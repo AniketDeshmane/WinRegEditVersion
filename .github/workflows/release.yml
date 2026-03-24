@@ -36,19 +36,22 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: actions/create-release@v1
         with:
           tag_name: ${{ github.sha }}
-          name: Release ${{ github.sha }}
-          body: "Automated release generated for commit ${{ github.sha }}"
+          release_name: Release ${{ github.sha }}
+          body: Automated release generated for commit ${{ github.sha }}
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+        uses: actions/upload-release-asset@v1
         with:
-          files: dist/docker_spoof_gui.exe
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/docker_spoof_gui.exe
+          asset_name: docker_spoof_gui.exe
+          asset_content_type: application/octet-stream
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
