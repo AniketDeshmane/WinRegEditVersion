@@ -4,17 +4,19 @@ import winreg
 import subprocess
 import json
 import os
+from profiles import WINDOWS_PROFILES, DEFAULT_PROFILE, get_profile_names, validate_profile
 
 REGISTRY_ROOT = winreg.HKEY_LOCAL_MACHINE
 REGISTRY_SUBKEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 BACKUP_FILE = "registry_backup_docker_spoof.json"
 
-SPOOF_VALUES = {
+# Use the default profile from profiles.py
+SPOOF_VALUES = WINDOWS_PROFILES.get(DEFAULT_PROFILE, {
     "CurrentBuild": "19045",
     "CurrentBuildNumber": "19045",
     "EditionID": "Professional",
     "DisplayVersion": "22H2",
-}
+})
 
 
 def open_registry_key(access=winreg.KEY_READ):
@@ -22,10 +24,16 @@ def open_registry_key(access=winreg.KEY_READ):
     return winreg.OpenKey(REGISTRY_ROOT, REGISTRY_SUBKEY, 0, access)
 
 
-def read_registry_values():
+def read_registry_values(keys=None):
+    """
+    Read registry values. If keys is None, read default set.
+    """
+    if keys is None:
+        keys = ["CurrentBuild", "CurrentBuildNumber", "EditionID", "DisplayVersion"]
+    
     values = {}
     with open_registry_key(winreg.KEY_READ) as key:
-        for name in ["CurrentBuild", "CurrentBuildNumber", "EditionID", "DisplayVersion"]:
+        for name in keys:
             try:
                 val, _ = winreg.QueryValueEx(key, name)
             except FileNotFoundError:
@@ -69,6 +77,10 @@ class DockerSpoofApp(tk.Tk):
         super().__init__()
         self.title("Windows Version Spoof Helper")
         self.resizable(False, False)
+        
+        # Initialize current spoof values from default profile
+        self.current_profile = DEFAULT_PROFILE
+        self.current_spoof_values = WINDOWS_PROFILES.get(self.current_profile, {}).copy()
 
         container = ttk.Frame(self, padding=10)
         container.grid(row=0, column=0, sticky="nsew")
@@ -77,9 +89,13 @@ class DockerSpoofApp(tk.Tk):
             value=r"C:\Users\Aniket\Downloads\Docker Desktop Installer.exe"
         )
         self.installer_args_var = tk.StringVar(
-            value="install --accept-license"  # default works for Docker, but you can change it
+            value="install --accept-license"
         )
+        
+        # Profile selection variable
+        self.profile_var = tk.StringVar(value=self.current_profile)
 
+        self._build_profile_selector(container)
         self._build_installer_path_ui(container)
         self._build_config_display(container)
         self._build_buttons(container)
@@ -110,9 +126,43 @@ class DockerSpoofApp(tk.Tk):
         args_entry = ttk.Entry(frame, textvariable=self.installer_args_var, width=60)
         args_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(5, 5), pady=(5, 0))
 
+    def _build_profile_selector(self, parent):
+        """Build Windows profile selector frame"""
+        frame = ttk.LabelFrame(parent, text="Windows Profile Selection", padding=10)
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Label(frame, text="Select Windows Version:").grid(row=0, column=0, sticky="w")
+        
+        profile_combo = ttk.Combobox(
+            frame,
+            textvariable=self.profile_var,
+            values=get_profile_names(),
+            state="readonly",
+            width=40
+        )
+        profile_combo.grid(row=0, column=1, sticky="ew", padx=(5, 5))
+        profile_combo.bind("<<ComboboxSelected>>", self.on_profile_changed)
+
+    def on_profile_changed(self, event=None):
+        """Handle profile selection change"""
+        profile_name = self.profile_var.get()
+        profile = WINDOWS_PROFILES.get(profile_name)
+        
+        if profile:
+            self.current_profile = profile_name
+            self.current_spoof_values = profile.copy()
+            
+            # Convert integer values to strings for display
+            for key, value in self.current_spoof_values.items():
+                self.current_spoof_values[key] = str(value)
+            
+            self.refresh_config_display()
+            self.status_var.set(f"Profile changed to: {profile_name}")
+
     def _build_config_display(self, parent):
         frame = ttk.LabelFrame(parent, text="Registry Configuration (HKLM)", padding=10)
-        frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(3, weight=1)
 
@@ -140,7 +190,7 @@ class DockerSpoofApp(tk.Tk):
 
             ttk.Label(frame, text="→").grid(row=i, column=2, sticky="w")
 
-            target_label = ttk.Label(frame, text=SPOOF_VALUES.get(key, "-"))
+            target_label = ttk.Label(frame, text=self.current_spoof_values.get(key, "-"))
             target_label.grid(row=i, column=3, sticky="w", padx=(5, 5))
             self.target_labels[key] = target_label
 
@@ -157,7 +207,7 @@ class DockerSpoofApp(tk.Tk):
 
     def _build_buttons(self, parent):
         frame = ttk.Frame(parent)
-        frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        frame.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
@@ -177,7 +227,7 @@ class DockerSpoofApp(tk.Tk):
 
     def _build_status(self, parent):
         frame = ttk.LabelFrame(parent, text="Status", padding=10)
-        frame.grid(row=3, column=0, sticky="ew")
+        frame.grid(row=4, column=0, sticky="ew")
         frame.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar(value="Ready.")
@@ -203,6 +253,10 @@ class DockerSpoofApp(tk.Tk):
 
         for key, label in self.current_labels.items():
             label.config(text=current.get(key, "-"))
+        
+        # Update target labels with current profile values
+        for key, label in self.target_labels.items():
+            label.config(text=self.current_spoof_values.get(key, "-"))
 
     def backup_spoof_install(self):
         installer_path = self.installer_path_var.get().strip()
@@ -231,7 +285,9 @@ class DockerSpoofApp(tk.Tk):
             return
 
         try:
-            write_registry_values(SPOOF_VALUES)
+            # Convert values to strings for registry writing
+            spoof_values_to_write = {k: str(v) for k, v in self.current_spoof_values.items()}
+            write_registry_values(spoof_values_to_write)
         except PermissionError:
             messagebox.showerror(
                 "Registry Permission Error",
