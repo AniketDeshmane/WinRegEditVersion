@@ -5,6 +5,11 @@ on:
     branches:
       - master
 
+permissions:
+  contents: write
+  releases: write
+  actions: read
+
 jobs:
   build-and-release:
     runs-on: windows-latest
