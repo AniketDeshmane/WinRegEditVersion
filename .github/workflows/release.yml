@@ -1,4 +1,4 @@
-name: Release on Push
+name: Build, Test & Release
 
 on:
   push:
@@ -7,11 +7,10 @@ on:
 
 permissions:
   contents: write
-  releases: write
-  actions: read
 
 jobs:
-  build-and-release:
+  test:
+    name: Run Tests
     runs-on: windows-latest
 
     steps:
@@ -23,53 +22,201 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -v
+
+  build-and-release:
+    name: Build EXE & Create Release
+    needs: test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog generation
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
 
-      - name: Build executable
+      # ── Compute next version from latest git tag ──
+      - name: Determine version
+        id: version
+        shell: pwsh
         run: |
-          py -m pip install --user pyinstaller
-          py -m PyInstaller --onefile --noconsole docker_spoof_gui.py
+          # Get latest version tag (e.g. v1.2.3), default to v0.0.0 if none exist
+          $latestTag = git tag --list "v*" --sort=-version:refname | Select-Object -First 1
+          if (-not $latestTag) {
+            $latestTag = "v0.0.0"
+          }
+          Write-Host "Latest tag: $latestTag"
 
-      - name: Archive build output
+          # Parse major.minor.patch
+          $parts = $latestTag.TrimStart('v').Split('.')
+          $major = [int]$parts[0]
+          $minor = [int]$parts[1]
+          $patch = [int]$parts[2]
+
+          # Check commit messages for version bump keywords
+          $commits = git log "$latestTag..HEAD" --pretty=format:"%s" 2>$null
+          if (-not $commits) {
+            $commits = git log --pretty=format:"%s"
+          }
+
+          $bumpMajor = $false
+          $bumpMinor = $false
+
+          foreach ($msg in $commits) {
+            if ($msg -match "BREAKING CHANGE|breaking:|major:") { $bumpMajor = $true }
+            elseif ($msg -match "feat:|feature:|minor:") { $bumpMinor = $true }
+          }
+
+          if ($bumpMajor) {
+            $major++; $minor = 0; $patch = 0
+          } elseif ($bumpMinor) {
+            $minor++; $patch = 0
+          } else {
+            $patch++
+          }
+
+          $newVersion = "$major.$minor.$patch"
+          $newTag = "v$newVersion"
+          Write-Host "New version: $newVersion (tag: $newTag)"
+
+          echo "VERSION=$newVersion" >> $env:GITHUB_OUTPUT
+          echo "TAG=$newTag" >> $env:GITHUB_OUTPUT
+
+      # ── Stamp version into version.py ──
+      - name: Stamp version into source
+        shell: pwsh
+        run: |
+          $versionFile = "version.py"
+          $content = Get-Content $versionFile -Raw
+          $content = $content -replace '__version__ = ".*"', ('__version__ = "' + "${{ steps.version.outputs.VERSION }}" + '"')
+          Set-Content $versionFile $content -NoNewline
+          Write-Host "Stamped version: ${{ steps.version.outputs.VERSION }}"
+          Get-Content $versionFile
+
+      # ── Build EXE with version in filename ──
+      - name: Build executable
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $exeName = "WinRegEditVersion_v${version}"
+
+          python -m PyInstaller `
+            --onefile `
+            --noconsole `
+            --name "$exeName" `
+            docker_spoof_gui.py
+
+          Write-Host "Built: dist/${exeName}.exe"
+          echo "EXE_NAME=${exeName}" >> $env:GITHUB_OUTPUT
+        id: build
+
+      # ── Generate release notes from commits since last tag ──
+      - name: Generate release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $latestTag = git tag --list "v*" --sort=-version:refname | Select-Object -First 1
+          $version = "${{ steps.version.outputs.VERSION }}"
+
+          $notes = "# 🚀 WinRegEditVersion v${version}`n`n"
+          $notes += "**Windows Version Spoof Helper** — Registry spoofing tool for running version-locked installers.`n`n"
+          $notes += "---`n`n"
+
+          # Categorize commits
+          $features = @()
+          $fixes = @()
+          $other = @()
+
+          if ($latestTag -and $latestTag -ne "v0.0.0") {
+            $logLines = git log "$latestTag..HEAD" --pretty=format:"%h|%s|%an" 2>$null
+          } else {
+            $logLines = git log --pretty=format:"%h|%s|%an" -20
+          }
+
+          foreach ($line in $logLines) {
+            if (-not $line) { continue }
+            $parts = $line.Split("|", 3)
+            $hash = $parts[0]
+            $subject = $parts[1]
+            $author = if ($parts.Count -gt 2) { $parts[2] } else { "unknown" }
+
+            $entry = "- ``$hash`` $subject (*$author*)"
+
+            if ($subject -match "^feat|^feature|^add") {
+              $features += $entry
+            } elseif ($subject -match "^fix|^bug|^patch|^hotfix") {
+              $fixes += $entry
+            } else {
+              $other += $entry
+            }
+          }
+
+          if ($features.Count -gt 0) {
+            $notes += "## ✨ New Features`n"
+            $notes += ($features -join "`n") + "`n`n"
+          }
+          if ($fixes.Count -gt 0) {
+            $notes += "## 🐛 Bug Fixes`n"
+            $notes += ($fixes -join "`n") + "`n`n"
+          }
+          if ($other.Count -gt 0) {
+            $notes += "## 📦 Other Changes`n"
+            $notes += ($other -join "`n") + "`n`n"
+          }
+
+          $notes += "---`n`n"
+          $notes += "## 📥 Installation`n"
+          $notes += "1. Download ``${{ steps.build.outputs.EXE_NAME }}.exe`` below`n"
+          $notes += "2. Right-click → **Run as Administrator**`n"
+          $notes += "3. Select your target Windows version profile`n"
+          $notes += "4. Browse to the installer you want to run`n"
+          $notes += "5. Click **Backup + Spoof + Install**, then **Restore from Backup** when done`n"
+
+          # Write to file (GitHub has issues with multiline outputs)
+          $notes | Out-File -FilePath "RELEASE_NOTES.md" -Encoding utf8
+          Write-Host $notes
+
+      # ── Upload build artifact ──
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: docker_spoof_gui-dist
-          path: dist/**
+          name: ${{ steps.build.outputs.EXE_NAME }}
+          path: dist/${{ steps.build.outputs.EXE_NAME }}.exe
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      # ── Create git tag ──
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.version.outputs.TAG }}
+          git push origin ${{ steps.version.outputs.TAG }}
+
+      # ── Create GitHub Release with notes & EXE ──
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.sha }}
-          release_name: Release ${{ github.sha }}
-          body: Automated release generated for commit ${{ github.sha }}
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: "v${{ steps.version.outputs.VERSION }} — WinRegEditVersion"
+          body_path: RELEASE_NOTES.md
+          files: dist/${{ steps.build.outputs.EXE_NAME }}.exe
           draft: false
           prerelease: false
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/docker_spoof_gui.exe
-          asset_name: docker_spoof_gui.exe
-          asset_content_type: application/octet-stream
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Output workflow metadata
-        run: |
-          echo "GITHUB_SHA=${GITHUB_SHA}" > workflow_info.txt
-          echo "GITHUB_REF=${GITHUB_REF}" >> workflow_info.txt
-          echo "GITHUB_ACTOR=${GITHUB_ACTOR}" >> workflow_info.txt
-          echo "GITHUB_EVENT_NAME=${GITHUB_EVENT_NAME}" >> workflow_info.txt
-
-      - name: Upload workflow metadata artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: workflow-metadata
-          path: workflow_info.txt

@@ -5,6 +5,7 @@ import subprocess
 import json
 import os
 from profiles import WINDOWS_PROFILES, DEFAULT_PROFILE, get_profile_names, validate_profile
+from version import __version__
 
 REGISTRY_ROOT = winreg.HKEY_LOCAL_MACHINE
 REGISTRY_SUBKEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
@@ -75,7 +76,7 @@ def is_running_as_admin():
 class DockerSpoofApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Windows Version Spoof Helper")
+        self.title(f"Windows Version Spoof Helper v{__version__}")
         self.resizable(False, False)
         
         # Initialize current spoof values from default profile

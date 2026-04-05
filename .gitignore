@@ -38,3 +38,8 @@ $RECYCLE.BIN/
 *.bak
 *.tmp
 
+# Generated release notes (CI only)
+RELEASE_NOTES.md
+
+# Code review graph
+.code-review-graph/
